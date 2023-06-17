@@ -1,0 +1,12 @@
+[package]
+name = "locksmith"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+openssl =  { version = "0.10", features = ["vendored"] }
+rand = "0.8"
+hexdump = "0.1"
+csv = "1.2"
