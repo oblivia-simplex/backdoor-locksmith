@@ -1,12 +1,19 @@
 
 
+debug: target/debug/locksmith
 
-bin/locksmith: Cargo.toml src/main.rs
-	sh -c "OPENSSL_DIR=openssl/local/ cargo build --release"
-	mkdir -p bin
-	cp target/release/locksmith bin/locksmith
+release: target/release/locksmith
 
 
+target/release/locksmith: Cargo.toml src/main.rs
+	cargo build --release
+	ls -lh target/release/locksmith
 
-openssl-1.0.2/:
-	tar xzf openssl-1.0.2.tar.gz
+
+target/debug/locksmith: Cargo.toml src/main.rs
+	cargo build
+	ls -lh target/debug/locksmith
+
+
+clean:
+	rm -rf target
